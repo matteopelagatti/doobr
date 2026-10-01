@@ -1,0 +1,26 @@
+# Keep the repository in LF regardless of the platform it is checked out on.
+* text=auto eol=lf
+
+# Binary files must be exempt from end-of-line conversion. `text=auto` relies on
+# a NUL-byte heuristic to detect binary content, and anything it misclassifies
+# gets its CRLF/LF rewritten on checkout -- which silently corrupts a compressed
+# R object. data/itaload.rda is xz-compressed, so this is not hypothetical:
+# a mangled .rda fails at load() with "cannot read workspace version" or an
+# unhelpful "bad restore file magic number".
+*.rda   binary
+*.rds   binary
+*.RData binary
+*.gz    binary
+*.bz2   binary
+*.xz    binary
+*.zip   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.pdf   binary
+
+# Text files whose end-of-line form matters.
+*.Rproj text eol=lf
+*.Rmd   text eol=lf
+*.R     text eol=lf

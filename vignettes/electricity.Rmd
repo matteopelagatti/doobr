@@ -1,0 +1,440 @@
+---
+title: "Applied example: Italian daily electricity load"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Applied example: Italian daily electricity load}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 7,
+                      fig.height = 4.2, fig.align = "center", dpi = 110)
+options(digits = 4)
+```
+
+```{r setup}
+library(doobr)
+data(itaload)
+str(itaload)
+```
+
+This vignette works through the applied example of the accompanying paper on the
+packaged data. The horizon is a week and the evaluation ensembles are 100 paths
+per fold so that the vignette builds quickly; the paper uses a fortnight and
+larger ensembles.
+
+The reason to run the method on this series rather than a simulated one is that
+here it finds things. Two of them are worth the whole vignette: a calendar
+specification that *improves every score while being demonstrably wrong*, and a
+conditional-scale target that improves the step-2 test by eighteen orders of
+magnitude while barely moving the energy score. Neither is visible without the
+martingale-difference tests.
+
+## The series
+
+```{r fig.height = 3.6}
+plot(itaload$date, itaload$load / 1e3, type = "l", col = "grey30",
+     xlab = "", ylab = "GWh", main = "Italian daily electricity load")
+```
+
+Two seasonal cycles — the weekly working-day/weekend alternation and the annual
+summer/winter double peak — plus holiday troughs that sit well below any
+weekend. The variance is visibly larger at both annual peaks than in the
+shoulder seasons.
+
+```{r}
+y <- itaload$load
+n <- length(y)
+h <- 7L                                  # one week ahead
+train <- seq_len(n - h)
+test  <- seq.int(n - h + 1L, n)          # held back for the fan chart
+mlags <- 1:14
+```
+
+## Three calendars
+
+The calendar is deterministic and known arbitrarily far ahead, which is what the
+method requires of a regressor. We try three versions of it, in increasing
+order of care.
+
+```{r}
+shift <- function(x, k) {
+  m <- length(x)
+  if (k > 0) c(rep(0, k), head(x, m - k)) else c(tail(x, m + k), rep(0, -k))
+}
+
+dow <- model.matrix(~ dow, itaload)[, -1, drop = FALSE]
+hol <- as.numeric(itaload$holiday)
+
+X_dow  <- dow                                            # weekday only
+X_hol  <- cbind(dow, hol = hol,                          # + holidays, same day
+                br = as.numeric(itaload$bridge))
+X_full <- cbind(X_hol,                                   # + holiday spillover
+                hol_next = shift(hol, -1),
+                hol_prev = shift(hol,  1))
+```
+
+```{r}
+fit1 <- function(Xm) doob_fit(
+  y[train], horizon = h, xreg = Xm[train, , drop = FALSE],
+  mean_model_fn = lm_model_fn, mlags = mlags, predict_mean_fn = lm_predict_fn,
+  nsim_eval = 100L, md_type = "additive", md_stat = "F", seed = 1, verbose = FALSE
+)
+
+f_dow  <- fit1(X_dow)
+f_hol  <- fit1(X_hol)
+f_full <- fit1(X_full)
+```
+
+```{r}
+report <- function(...) {
+  fs <- list(...)
+  t(sapply(fs, function(f) {
+    e <- f$oof_resid[f$bank_idx]
+    c(resid_sd = sd(e),
+      acf1 = acf(e, plot = FALSE, lag.max = 7)$acf[2],
+      acf7 = acf(e, plot = FALSE, lag.max = 7)$acf[8],
+      p_step1 = f$md$step1, p_step2 = f$md$step2,
+      ES = f$eval$mean_es, VS = f$eval$mean_vs)
+  }))
+}
+tab <- report(dow = f_dow, dow_hol = f_hol, dow_hol_spill = f_full)
+rownames(tab) <- c("weekday only", "+ holiday, same day", "+ holiday spillover")
+tab
+```
+
+Read the second row against the first. Adding the holiday and bridge dummies
+cuts the residual standard deviation by 27% and the energy score by 14%. On any
+fit or scoring criterion it is an improvement, and a large one.
+
+The step-1 martingale-difference test says it is a disaster: the p-value falls
+from 2.6e-03 to 9.5e-32, and the residual lag-1 autocorrelation jumps from
+0.004 to 0.399. Something that looks like a better model has acquired a gross
+violation of the property the whole method rests on.
+
+The diagnosis is in the structure of Italian holidays. They cluster — Christmas
+to Epiphany, the 25 April / 1 May pair, mid-August — and load stays depressed on
+the days *around* a marked holiday, not only on the holiday itself. A same-day
+indicator removes the large central drop and leaves the shoulders behind as a
+run of correlated residuals. The third row allows the effect to spill one day
+either side:
+
+```{r}
+tab[, c("resid_sd", "acf1", "p_step1", "ES")]
+```
+
+The lag-1 autocorrelation returns to 0.041, the step-1 p-value recovers by
+twenty-four orders of magnitude, *and* the residual standard deviation falls a
+further 20%. The test did not trade fit for correctness; it pointed at a
+genuinely missing feature.
+
+This is the case for testing rather than scoring. The energy score ranked the
+broken calendar above the bare one. It was not wrong to do so — the broken
+calendar does predict better — but a scenario generator built on it resamples
+innovations that are 40% predictable from their own past, which is precisely
+what must not happen.
+
+### What is left over
+
+```{r}
+c(acf7 = tab["+ holiday spillover", "acf7"],
+  p_step1 = tab["+ holiday spillover", "p_step1"])
+```
+
+The best calendar still leaves a lag-7 autocorrelation of 0.23 and a step-1
+p-value of 5e-08. This is real and we have not removed it. Adding annual
+harmonics, day-of-week by season interactions, a linear trend, more lags (up to
+28), and heating and cooling degree days from the packaged temperature series
+each leave it between 0.22 and 0.26. Whatever drives it operates at the weekly
+lag and is not a smooth function of the calendar or of contemporaneous
+temperature.
+
+The practical consequence is worth stating plainly, because it is the kind of
+thing a diagnostic is for: the innovation bank still contains predictable
+structure at the weekly lag, so the simulated paths will understate how much a
+week-ahead outcome can be anticipated. The ensembles below are usable but not
+innocent, and a paper reporting them should say so.
+
+## Step 2: the conditional scale
+
+One thing to understand before setting the number of folds. The
+conditional-scale model is trained on **out-of-fold** residuals, because
+in-sample residuals are exactly what the method exists to avoid. So the step-2
+training sample is the innovation bank, whose size is the number of folds times
+the fold length — not the length of the series. Leave `n_folds` at its default
+and the series is partitioned exhaustively:
+
+```{r}
+c(n_folds = f_full$n_folds, bank_size = length(f_full$bank),
+  series = length(f_full$spec$w))
+```
+
+Cutting `n_folds` to 8 to save time would leave 49 observations to fit a
+13-parameter scale model, and the fitted variances come out wild — on this
+series that alone drove `c_hat` above 7. If the scale model misbehaves, check
+the bank size first.
+
+```{r}
+fit2 <- function(vt) doob_fit(
+  y[train], horizon = h, xreg = X_full[train, , drop = FALSE],
+  mean_model_fn = lm_model_fn, mlags = mlags, predict_mean_fn = lm_predict_fn,
+  variance_model_fn = lm_model_fn, vlags = c(1L, 7L),
+  predict_variance_fn = lm_predict_fn, var_target = vt,
+  nsim_eval = 100L, md_type = "additive", md_stat = "F", seed = 1, verbose = FALSE
+)
+f_sq <- fit2("squared")
+f_la <- fit2("logabs")
+```
+
+```{r}
+t(sapply(list(constant = f_full, squared = f_sq, logabs = f_la),
+         function(f) c(c_hat = f$c_hat, kappa_hat = f$kappa_hat,
+                       scale_failures = f$n_scale_failures,
+                       p_step2 = f$md$step2, ES = f$eval$mean_es)))
+```
+
+Now the mirror image of the calendar story. The energy score separates the three
+fits by about 1%: constant 34559, squared 35076, logabs 34185. By that measure
+there is nothing to choose. The step-2 test separates them by eighteen orders of
+magnitude — 2.7e-23 for the homoskedastic fit against 2.8e-05 for `logabs`. The
+squared-residual target is *worse* than no scale model at all on this series
+(2.0e-25).
+
+Two mechanisms are behind that last result, and both are visible in the table.
+
+**Least squares on squared residuals has no sign constraint.** At 67 of the 980
+bank states the fitted variance lands at or below zero. Those states are
+excluded from the innovation bank rather than clipped into it:
+
+```{r}
+c(failures = f_sq$n_scale_failures, of = length(f_sq$bank) + f_sq$n_scale_failures,
+  sigma_floor = f_sq$sigma_range[1], sigma_ceiling = f_sq$sigma_range[2])
+```
+
+Exclusion rather than clipping matters more than it looks. `c_hat` is a
+root-mean-square and is not robust; a state whose fitted variance is near zero
+against an ordinary residual produces an enormous standardised residual, and a
+handful of those dominate the constant. An earlier implementation clipped them
+into the bank, which on this series drove `c_hat` to 8.67 and inflated the mean
+energy score from 230,247 to 753,751 — a 75-fold inflation of the simulated
+scale, with every diagnostic computed on the normalised bank still passing.
+Winsorising the standardised residuals was tried as an alternative and is wrong:
+it trims the tails of the innovation distribution, which is exactly what a
+scenario generator must reproduce. The contamination comes from broken variance
+estimates, not from large residuals.
+
+**Fitting `log|e|` is positive by construction**, so `logabs` has nothing to
+exclude, and it needs only `Var(log|eta|)` finite rather than a fourth moment.
+The price is a multiplicative bias: least squares on `log|eps|` estimates
+`log(sigma) + kappa` with `kappa = E log|eta|`, about -0.635 for Gaussian
+innovations. Here:
+
+```{r}
+c(kappa_hat = f_la$kappa_hat, implied_factor = exp(f_la$kappa_hat),
+  c_hat = f_la$c_hat)
+```
+
+`kappa_hat` of -0.86 is more negative than the Gaussian value, consistent with
+innovations heavier-tailed than normal. Exponentiating the fit without
+correction would understate the conditional standard deviation by a factor of
+2.4. `c_hat` removes that without knowing the innovation distribution — and
+note that it is **carried into the conditional variance**, not used to normalise
+the bank. Normalising the bank alone would leave the whole scale resting on the
+variance model; moving the constant across lets a multiplicative bias in the
+fitted variance cancel in the product.
+
+A caveat on reading the step-2 column at all: the second test is a statement
+about `e^2 - v` given that the first step has produced genuine martingale
+differences. Step 1 still rejects at 5e-08 here, so some of what step 2 sees may
+be mean misspecification arriving in the squared residuals. The ranking of the
+three targets is informative; the absolute p-values are not clean.
+
+## Calibration of the simulated paths
+
+```{r}
+calibration_tests(f_la)
+```
+
+```{r fig.height = 3.4}
+ct <- calibration_tests(f_la)
+hist(ct$rank$ranks, breaks = 12, col = "grey85", border = "white",
+     main = "Rank histogram, out-of-fold", xlab = "rank of the realisation")
+```
+
+The three blocks answer different questions, and here they disagree in an
+informative way. The rank histogram rejects at 6.7e-04. The permutation test on
+the energy score returns 0.93 and the band-depth test 0.90 — and a p-value near
+*one* is itself a diagnosis, not a pass: it means the realised path is more
+central than the simulated ones, i.e. the ensemble is too dispersed as a
+trajectory. (The variogram test, at 0.56, is the one block that sees nothing
+either way.) The rejection and the near-ones point the same way. The mean model leaves predictable
+structure, that structure inflates the innovation bank, and the paths come out
+wider than the data warrants.
+
+Compare the bare-calendar fit, whose residual standard deviation is 70% larger:
+
+```{r}
+t(sapply(list(dow = f_dow, full = f_full, logabs = f_la), function(f) {
+  k <- calibration_tests(f)
+  c(p_rank = k$rank$pval, p_energy = k$perm_es$fisher_pval,
+    p_band = k$band$fisher_pval)
+}))
+```
+
+The over-dispersion signature is strongest exactly where the mean model is
+worst. One caveat on the first column: the pooled rank test treats ranks at
+adjacent steps within a fold as independent when they are positively dependent,
+so it is mildly liberal — under a correctly specified model it rejects 12–14% of
+the time at a nominal 5%. Read it comparatively, as above, rather than against
+0.05.
+
+## The held-back week
+
+The future calendar is known, so it can be passed directly to `simulate()`:
+
+```{r}
+paths <- simulate(f_la, nsim = 2000L, seed = 11,
+                  newxreg = X_full[test, , drop = FALSE])
+paths
+```
+
+```{r}
+qs  <- apply(paths$paths, 1L, quantile, c(0.05, 0.25, 0.5, 0.75, 0.95)) / 1e3
+act <- y[test] / 1e3
+hist_tail <- (n - h - 20L):(n - h)
+
+plot(c(hist_tail, test), c(y[hist_tail], act) / 1e3, type = "n",
+     xlab = "day index", ylab = "GWh",
+     main = sprintf("%d-day fan chart, held-back week", h))
+polygon(c(test, rev(test)), c(qs[1, ], rev(qs[5, ])),
+        col = adjustcolor("steelblue", 0.20), border = NA)
+polygon(c(test, rev(test)), c(qs[2, ], rev(qs[4, ])),
+        col = adjustcolor("steelblue", 0.35), border = NA)
+lines(hist_tail, y[hist_tail] / 1e3, col = "grey30")
+lines(test, qs[3, ], col = "steelblue", lwd = 2)
+lines(test, act, col = "firebrick", lwd = 2)
+legend("topleft", bty = "n", lwd = 2, cex = 0.85,
+       col = c("grey30", "steelblue", "firebrick"),
+       legend = c("history", "simulated median", "realised"))
+```
+
+```{r}
+pit <- rowMeans(paths$paths < y[test])
+rbind(quantile_of_realisation = round(pit, 3))
+```
+
+Seven points say very little — the out-of-fold calibration tests above are the
+assessment, because they average over 140 independent weeks. The fan chart is
+here to be looked at, not scored.
+
+## A scenario tree
+
+For a multistage stochastic program the flat ensemble is replaced by a tree that
+branches on the martingale component, so the Doob decomposition is inherited
+node by node.
+
+```{r}
+tr <- simulate(f_la, output = "tree", seed = 12,
+               branching = c(5L, 3L, rep(2L, h - 2L)),
+               newxreg = X_full[test, , drop = FALSE])
+tr
+```
+
+The branching is front-loaded deliberately: early uncertainty is what a
+here-and-now decision must hedge, and the leaf count is the product of the
+branching vector, so late stages have to be thin.
+
+The property that makes the tree usable is that it adds no predictability of its
+own. At the root the model forecast is computable directly, so the identity can
+be checked against it:
+
+```{r}
+sp <- f_la$spec
+w  <- tail(sp$w, max(c(sp$mlags, sp$vlags)))
+yl <- setNames(w[length(w) - sp$mlags + 1L], paste0("lag", sp$mlags))
+mu <- as.numeric(sp$predict_mean_fn(f_la$models$mean, yl,
+                                    X_full[test, , drop = FALSE][1L, , drop = FALSE]))
+
+ch <- tr$nodes[tr$nodes$stage == 1L, ]
+c(tree_mean = sum(ch$cond_prob * ch$value_model), model_forecast = mu,
+  abs_error = abs(sum(ch$cond_prob * ch$value_model) - mu))
+```
+
+Deeper in the tree the conditional scale differs from node to node, but the
+*atoms* do not: the quantised innovation bank is shared by every node at a given
+stage. So the standardised child deviations must coincide across all parents,
+which is checkable without knowing any node's conditional variance:
+
+```{r}
+d   <- tr$nodes[tr$nodes$stage == 2L, ]
+pat <- sapply(split(d, d$parent), function(k) {
+  dev <- k$value_model - sum(k$cond_prob * k$value_model)
+  dev / sqrt(sum(k$cond_prob * dev^2))
+})
+round(pat, 12)
+max(apply(pat, 1L, function(r) diff(range(r))))
+```
+
+Identical to machine precision across the five stage-2 parents. The node-by-node
+verification of both moment identities, at every stage and under both the levels
+and the differenced recursion, is in the package's test suite.
+
+## Why temperature is not in the model
+
+The packaged data includes a `temperature` column, and it is tempting to use it.
+It does help:
+
+```{r}
+X_temp <- cbind(X_full,
+                hdd = pmax(18 - itaload$temperature, 0),
+                cdd = pmax(itaload$temperature - 21, 0))
+f_temp <- fit1(X_temp)
+
+t(sapply(list(no_temp = f_full, with_temp = f_temp),
+         function(f) c(resid_sd = sd(f$oof_resid[f$bank_idx]),
+                       p_step1 = f$md$step1, ES = f$eval$mean_es)))
+```
+
+The energy score improves by 7% and the residual standard deviation by 3%. The
+step-1 p-value does not improve, which is the third appearance of the same
+lesson in this vignette: a better score is not a better specification.
+
+The deeper problem is not statistical. Those scores are the scores of
+simulations made *given a known temperature path*, because the evaluation folds
+supply the realised temperature. To simulate a genuine future you must pass
+`newxreg`, which means supplying a temperature path you do not have. What comes
+out is then the conditional law of load given that path, not the predictive law
+of load. The two differ by the variance contributed by temperature uncertainty,
+which for a week-ahead electricity forecast is not small.
+
+There are three honest responses. Use only deterministic regressors, as the main
+example does, and accept a wider but correct ensemble. Condition deliberately on
+a named temperature scenario and report it as such, which is legitimate for
+stress testing. Or model load and temperature jointly — the multivariate
+extension, which is the right answer and is not yet implemented. A single-
+equation method cannot resolve this, and a regressor whose future is unknown
+will always flatter the diagnostics while producing ensembles that are too
+narrow in use.
+
+## Summary
+
+```{r}
+t(sapply(list(bare = f_dow, broken_calendar = f_hol, good_calendar = f_full,
+              squared = f_sq, logabs = f_la),
+         function(f) c(resid_sd = sd(f$oof_resid[f$bank_idx]),
+                       c_hat = f$c_hat, failures = f$n_scale_failures,
+                       p_step1 = f$md$step1, p_step2 = f$md$step2,
+                       ES = f$eval$mean_es)))
+```
+
+Four things to carry away from this series.
+
+A specification can improve every score while becoming grossly misspecified for
+simulation; only a test on the first estimation step catches it. The second step
+needs its own test, because the energy score separates conditional-scale targets
+by 1% where the test separates them by eighteen orders of magnitude. The
+`logabs` target avoids the sign problem of fitting squared residuals, at the cost
+of a constant that must be estimated and carried into the variance rather than
+discarded. And a regressor is usable here only if its future path is genuinely
+known — which, for weather, it is not.

@@ -1,0 +1,274 @@
+---
+title: "Getting started with doobr"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started with doobr}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", fig.width = 7,
+                      fig.height = 4, fig.align = "center", dpi = 110)
+set.seed(1)
+```
+
+```{r setup}
+library(doobr)
+```
+
+## The problem
+
+Scenario generation asks for a set of plausible future paths of a time series.
+The usual recipe is to fit a forecasting model, take its residuals, and resample
+them around the forecast. The step that breaks is the second one.
+
+The Doob decomposition splits any adapted process into a predictable part and a
+martingale. The predictable part is exactly what a forecasting model estimates;
+the martingale increments are exactly what must be sampled. If the model
+recovered the conditional mean perfectly its residuals *would* be martingale
+differences and could be resampled. But the model is estimated, and its
+residuals are evaluated at the very observations used to fit it. Those residuals
+are systematically too small and carry structure that is an artefact of the
+fitting procedure. Resample them and you get scenario sets that are
+overconfident and that inject predictability which is not in the data.
+
+`doobr` fixes this by never using an in-sample residual. The series is cut into
+contiguous folds; each fold is predicted by a model that never saw it; and the
+innovations are resampled from the resulting bank of out-of-fold standardised
+residuals.
+
+## The shortest possible example
+
+```{r}
+y <- as.numeric(arima.sim(list(ar = 0.7), 500)) + 50
+
+fit <- doob_fit(
+  y, horizon = 8,
+  mean_model_fn   = lm_model_fn,
+  mlags           = c(1, 2),
+  predict_mean_fn = lm_predict_fn,
+  md_type = "additive", md_stat = "F",   # fast settings for the vignette
+  nsim_eval = 100, seed = 1, verbose = FALSE
+)
+fit
+```
+
+The printout is the whole diagnostic story. The bank has mean exactly zero and
+variance exactly one by construction. `c_hat` is the scale constant (more on it
+below). The two martingale p-values test the two estimation steps. The scores
+come from simulating each fold from models that never saw it.
+
+Simulating is then a separate, cheap step:
+
+```{r}
+paths <- simulate(fit, nsim = 500, seed = 2)
+paths
+plot(paths)
+```
+
+## Supplying your own learner
+
+Any learner works. You supply a matched pair:
+
+```{r eval = FALSE}
+model_fn(y, y_lags, xreg) -> model
+predict_fn(model, lags_vec, xreg_row) -> scalar
+```
+
+`y_lags` is a matrix whose columns are named `lag1`, `lag12` and so on;
+`lags_vec` is a single named row of it. Adapters for linear models, random
+forests, SVMs and XGBoost ship with the package. A hand-written one is short:
+
+```{r}
+my_model_fn <- function(y, y_lags, xreg = NULL) {
+  X <- cbind(1, y_lags, y_lags^2)        # quadratic in the lags
+  if (!is.null(xreg)) X <- cbind(X, xreg)
+  qr.solve(X, y)
+}
+my_predict_fn <- function(model, lags_vec, xreg_row = NULL) {
+  x <- c(1, lags_vec, lags_vec^2)
+  if (!is.null(xreg_row)) x <- c(x, as.numeric(xreg_row))
+  sum(model * x)
+}
+```
+
+Use it for the conditional scale as well as the conditional mean:
+
+```{r}
+fit2 <- doob_fit(
+  y, horizon = 8,
+  mean_model_fn = lm_model_fn, mlags = c(1, 2), predict_mean_fn = lm_predict_fn,
+  variance_model_fn = my_model_fn, vlags = 1, predict_variance_fn = my_predict_fn,
+  var_target = "logabs",
+  md_type = "additive", md_stat = "F", nsim_eval = 100, seed = 1, verbose = FALSE
+)
+fit2
+```
+
+## Two things that look like details and are not
+
+### The scale constant
+
+With `var_target = "logabs"` the conditional-scale model is fitted to
+$\log|\hat\varepsilon|$, which guarantees a positive variance and needs far
+weaker moment conditions than fitting to $\hat\varepsilon^2$. But least squares
+on $\log|\varepsilon|$ estimates $\log\sigma + \kappa$, where
+$\kappa = E\log|\eta| \approx -0.635$ for Gaussian innovations. Exponentiating
+the fit is therefore biased by $e^{\kappa}\approx 0.53$ — a factor of nearly two
+in the standard deviation.
+
+`doobr` removes this without needing to know the innovation distribution. The
+constant is estimated as the dispersion of the raw standardised residuals and
+**carried into the conditional variance** rather than discarded:
+
+```{r}
+c(c_hat = fit2$c_hat, kappa_hat = fit2$kappa_hat)
+```
+
+Note what `c_hat` is *not*. It would be tempting to normalise the bank to unit
+variance and leave the fitted variance alone. That destroys a self-correction:
+if the fitted variance is biased by a constant factor, the raw standardised
+residuals absorb it and the product is correctly scaled, whereas after
+normalising the bank the whole scale rests on the variance model. The constant
+has to move from one to the other.
+
+### Which scale the diagnostics live on
+
+For a strictly positive series you will usually model logarithms. Pass the
+series on its **original** scale and let the package transform it:
+
+```{r}
+z <- exp(cumsum(rnorm(400, 0, 0.02)) + 5)
+fit3 <- doob_fit(z, horizon = 10,
+                 mean_model_fn = lm_model_fn, mlags = 1,
+                 predict_mean_fn = lm_predict_fn,
+                 transform = "log", difference = TRUE,
+                 md_type = "additive", md_stat = "F",
+                 nsim_eval = 100, seed = 1, verbose = FALSE)
+p3 <- simulate(fit3, nsim = 500, seed = 3)
+range(p3$paths)       # back on the original scale
+```
+
+Simulating in logs and exponentiating is exactly right — simulation is a
+statement about the conditional law, and laws transform by change of variables.
+No correction is involved. What *does* change is that `exp(mu)` is the
+conditional **median**, not the conditional mean; the mean is `exp(mu)` times
+the smearing factor, which the ensemble already reproduces and which is reported
+per step:
+
+```{r}
+round(p3$smearing[c(1, 5, 10)], 5)
+```
+
+If a decision problem is linear in the original scale, take its conditional mean
+from the ensemble, or as `exp(mu) * smearing`, not as `exp(mu)`.
+
+One consequence worth knowing: the rank histogram is invariant to a monotone
+transformation, because ranks are, whereas the energy, variogram and band-depth
+statistics are not. Reporting those three requires naming a scale.
+
+## Diagnostics
+
+### Are the residuals martingale differences?
+
+Two tests, on the two estimation steps:
+
+```{r}
+fit2$md
+```
+
+Step 1 tests $E[\varepsilon_t \mid \mathcal F_{t-1}] = 0$: has the conditional
+mean captured all predictable structure in the level? Step 2 tests
+$E[\varepsilon_t^2 - v_t \mid \mathcal F_{t-1}] = 0$: has the conditional scale
+removed all predictable structure from the squared residuals?
+
+Testing the second step matters. A pipeline that passes step 1 and fails step 2
+produces paths with the right drift and the wrong spread — and, as the
+electricity vignette shows, the energy score will not tell you.
+
+These are not tests of zero autocorrelation. They regress the series on B-spline
+transforms of its lagged values mapped to the empirical copula scale, so they
+have power against nonlinear predictable structure that a Ljung–Box test cannot
+see.
+
+### Is the realised path distinguishable from the simulated ones?
+
+```{r}
+calibration_tests(fit2)
+```
+
+Three complementary views. The **rank histogram** is marginal: U-shaped means
+too little spread, hump-shaped too much, skewed means a biased mean. The
+**permutation tests** compare the realised path's score against the scores of
+the simulated paths treated in turn as the realisation, and are exact in finite
+samples. **Band depth** is a path-level test; a p-value near one means the
+realised path is *more* central than the simulated ones, i.e. the ensemble is
+too dispersed as a trajectory even if each marginal looks fine.
+
+The pooled rank test is mildly liberal — it treats ranks at adjacent steps
+within a fold as independent when they are positively dependent — so read it
+against a baseline from a correctly specified model rather than against 0.05.
+
+## Scenario trees
+
+For a multistage stochastic program the flat ensemble is replaced by a tree.
+`doobr` branches on the **martingale component**, so the tree inherits the Doob
+decomposition node by node:
+
+```{r}
+tr <- simulate(fit, output = "tree", branching = c(5, 4, 3, 2, 2, 2, 2, 2), seed = 4)
+tr
+head(tr$nodes, 4)
+```
+
+At every non-leaf node the children satisfy $\sum_c q_c e_c = 0$ and
+$\sum_c q_c e_c^2 = 1$ **exactly**. The first identity says the conditional
+expectation of the next-stage value equals the model forecast; the second says
+the conditional variance equals the fitted one. Both can be checked directly
+here, because this fit is homoskedastic so the conditional scale is a known
+constant:
+
+```{r}
+s   <- fit$spec
+yl  <- setNames(tail(s$w, max(s$mlags))[max(s$mlags) - s$mlags + 1L],
+                paste0("lag", s$mlags))
+mu  <- as.numeric(s$predict_mean_fn(fit$models$mean, yl, NULL))
+sd1 <- s$c_hat * min(max(sqrt(s$const_v), s$s_lo), s$s_hi)
+
+ch  <- tr$nodes[tr$nodes$stage == 1, ]
+e   <- (ch$value_model - mu) / sd1
+c(mean_identity = sum(ch$cond_prob * e),
+  var_identity  = sum(ch$cond_prob * e^2) - 1)
+```
+
+This is the property that makes the tree usable for intertemporal decisions: it
+introduces no spurious predictability at any node.
+
+Tree size is `prod(branching)` leaves, so it grows fast; `simulate()` refuses
+anything above `max_nodes` with a message telling you how big you asked for.
+
+## What the method assumes
+
+Two assumptions are worth stating because they are easy to miss.
+
+**A pooled innovation bank requires a location–scale structure.** The martingale
+property controls the first conditional moment and the scale model the second,
+but a single bank drawn identically across states is valid only if the
+conditional law has a *shape* that does not depend on the state. A martingale
+difference with unit conditional variance can still have state-dependent
+skewness or tail index. Martingale-difference plus correct conditional variance
+is necessary but not sufficient.
+
+**The regressors must be deterministic over the simulation span.** If a
+regressor is genuinely stochastic, what you get is the law *conditional on a
+given regressor path*, not the predictive law. The electricity vignette returns
+to this.
+
+See `DESIGN.md` in the source repository for the full specification and
+`DECISIONS.md` for the choices behind the implementation.
+
+## Where next
+
+The companion vignette, `vignette("electricity", package = "doobr")`, works
+through a real application with four learners and both variance targets.

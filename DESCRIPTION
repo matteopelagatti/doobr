@@ -1,0 +1,29 @@
+Package: doobr
+Type: Package
+Title: Nonparametric Simulation of Future Sample Paths for Scenario Generation
+Version: 0.1.0
+Authors@R: c(
+    person("Tommaso", "Ferrario", role = "aut"),
+    person("Alan", "King", role = "aut"),
+    person("Enza", "Messina", role = "aut"),
+    person("Matteo", "Pelagatti", , "matteo.pelagatti@unimib.it", role = c("aut", "cre")),
+    person("Hongyu", "Zhang", role = "aut"))
+Description: Generates future sample paths and scenario trees for a univariate
+    time series without assuming a parametric data generating process. Any
+    learner may supply the conditional mean and conditional scale; the
+    innovations are resampled from an honest bank of out-of-fold standardised
+    residuals obtained by purged K-fold cross-fitting, so that the simulated
+    increments form a martingale difference sequence rather than inheriting the
+    optimism of in-sample residuals. Provides martingale-difference tests for
+    both estimation steps and calibration tests for the simulated paths.
+License: GPL-3
+Encoding: UTF-8
+Depends: R (>= 4.0)
+Imports: stats, graphics, grDevices, utils, splines
+LazyData: true
+Suggests: testthat (>= 3.0.0), randomForest, e1071, xgboost, knitr, rmarkdown
+VignetteBuilder: knitr
+Config/testthat/edition: 3
+RoxygenNote: 7.3.3
+URL: https://github.com/mpelagatti/doobr
+BugReports: https://github.com/mpelagatti/doobr/issues

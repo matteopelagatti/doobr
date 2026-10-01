@@ -1,0 +1,7 @@
+^.*\.Rproj$
+^\.Rproj\.user$
+^data-raw$
+^CLAUDE\.md$
+^DESIGN\.md$
+^DECISIONS\.md$
+^\.github$
