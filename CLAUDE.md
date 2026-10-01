@@ -6,6 +6,16 @@ same golden fixture). The method is described in `DESIGN.md`; the non-obvious
 choices and why they were made are in `DECISIONS.md`. **Read both before
 changing anything in `R/doob_fit.R` or `R/tree.R`.**
 
+## Repositories
+
+- **doobr** (this package): <https://github.com/matteopelagatti/doobr>
+- **doobpy** (companion): <https://github.com/matteopelagatti/doobpy>
+
+The GitHub account is **matteopelagatti**, not `mpelagatti`. An earlier draft of
+`DESCRIPTION`, `README.md` and doobpy's `pyproject.toml` had the wrong name and
+shipped dead `URL:`/`BugReports:` links; if you see `mpelagatti` anywhere, it is
+a bug.
+
 ## Environment setup
 
 R is not preinstalled in the cloud container, and **CRAN is blocked** by the

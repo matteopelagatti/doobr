@@ -11,8 +11,8 @@ Generates future sample paths and scenario trees for a univariate time series wi
 \seealso{
 Useful links:
 \itemize{
-  \item \url{https://github.com/mpelagatti/doobr}
-  \item Report bugs at \url{https://github.com/mpelagatti/doobr/issues}
+  \item \url{https://github.com/matteopelagatti/doobr}
+  \item Report bugs at \url{https://github.com/matteopelagatti/doobr/issues}
 }
 
 }

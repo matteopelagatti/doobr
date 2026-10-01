@@ -10,13 +10,13 @@ form a martingale difference sequence rather than inheriting the optimism of
 in-sample residuals — which is what makes naive residual resampling inject
 artificial predictability into generated scenarios.
 
-Companion Python package: [doobpy](https://github.com/mpelagatti/doobpy).
+Companion Python package: [doobpy](https://github.com/matteopelagatti/doobpy).
 
 ## Install
 
 ```r
 # install.packages("remotes")
-remotes::install_github("mpelagatti/doobr")
+remotes::install_github("matteopelagatti/doobr", build_vignettes = TRUE)
 ```
 
 ## Use
